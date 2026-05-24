@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: mapa-viagem-proxy
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: dd6073f7fb54ed8586eda1d766803a6b
+        sync: false
