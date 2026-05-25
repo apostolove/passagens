@@ -92,30 +92,74 @@ async def airports(q: str = Query(..., min_length=2)):
 async def explore(
     origin: str = Query(..., description="IATA da origem, ex: SAO"),
     currency: str = "brl",
+    depart_month: str | None = Query(None, description="YYYY-MM (opcional)"),
+    direct: bool = False,
 ):
     _need_token()
-    url = f"{TP_BASE}/v1/city-directions"
-    params = {"origin": origin.upper(), "currency": currency}
-    headers = {"X-Access-Token": TP_TOKEN}
-    async with httpx.AsyncClient() as client:
+    rows = []
+
+    # 1) Tenta v3 prices_for_dates: traz duração, companhia, link e + destinos.
+    v3 = f"{TP_BASE}/aviasales/v3/prices_for_dates"
+    v3params = {
+        "origin": origin.upper(),
+        "currency": currency,
+        "unique": "true",          # 1 (o mais barato) por destino
+        "sorting": "price",
+        "direct": str(direct).lower(),
+        "limit": 1000,
+        "token": TP_TOKEN,
+    }
+    if depart_month:
+        v3params["departure_at"] = depart_month
+    try:
+        async with httpx.AsyncClient() as client:
+            data = await _get(client, v3, params=v3params)
+        for it in data.get("data") or []:
+            rows.append(
+                {
+                    "destination": it.get("destination"),
+                    "price": it.get("price"),
+                    "currency": currency,
+                    "departure_at": it.get("departure_at"),
+                    "return_at": it.get("return_at"),
+                    "transfers": it.get("transfers"),
+                    "airline": it.get("airline"),
+                    "duration_to": it.get("duration_to"),
+                    "duration_back": it.get("duration_back"),
+                    "link": it.get("link"),
+                }
+            )
+    except httpx.HTTPError:
+        rows = []
+
+    # 2) Fallback: city-directions (sem duração) se o v3 não trouxe nada.
+    if not rows:
         try:
-            data = await _get(client, url, params=params, headers=headers)
+            async with httpx.AsyncClient() as client:
+                data = await _get(
+                    client,
+                    f"{TP_BASE}/v1/city-directions",
+                    params={"origin": origin.upper(), "currency": currency},
+                    headers={"X-Access-Token": TP_TOKEN},
+                )
+            for dest, info in (data.get("data") or {}).items():
+                rows.append(
+                    {
+                        "destination": dest,
+                        "price": info.get("price"),
+                        "currency": currency,
+                        "departure_at": info.get("departure_at"),
+                        "return_at": info.get("return_at"),
+                        "transfers": info.get("transfers"),
+                        "airline": info.get("airline"),
+                        "duration_to": None,
+                        "duration_back": None,
+                        "link": None,
+                    }
+                )
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Travelpayouts falhou: {e}")
 
-    rows = []
-    for dest, info in (data.get("data") or {}).items():
-        rows.append(
-            {
-                "destination": dest,
-                "price": info.get("price"),
-                "currency": currency,
-                "departure_at": info.get("departure_at"),
-                "return_at": info.get("return_at"),
-                "transfers": info.get("transfers"),
-                "airline": info.get("airline"),
-            }
-        )
     rows.sort(key=lambda r: (r["price"] is None, r["price"] or 0))
     return {"ok": True, "origin": origin.upper(), "results": rows}
 
