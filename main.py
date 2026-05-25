@@ -174,39 +174,77 @@ async def calendar(
     depart_month: str = Query(..., description="YYYY-MM"),
     return_month: str | None = None,
     currency: str = "brl",
+    direct: bool = False,
 ):
     _need_token()
-    url = f"{TP_BASE}/v1/prices/calendar"
-    params = {
+    days_map = {}
+
+    # 1) v3 prices_for_dates: ida-volta, MESMA fonte dos cards -> números batem.
+    v3 = f"{TP_BASE}/aviasales/v3/prices_for_dates"
+    v3params = {
         "origin": origin.upper(),
         "destination": destination.upper(),
-        "depart_date": depart_month,
-        "calendar_type": "departure_date",
+        "departure_at": depart_month,
         "currency": currency,
+        "unique": "false",
+        "sorting": "price",
+        "direct": str(direct).lower(),
+        "limit": 1000,
+        "token": TP_TOKEN,
     }
-    if return_month:
-        params["return_date"] = return_month
-    headers = {"X-Access-Token": TP_TOKEN}
-    async with httpx.AsyncClient() as client:
+    try:
+        async with httpx.AsyncClient() as client:
+            data = await _get(client, v3, params=v3params)
+        for it in data.get("data") or []:
+            dep = (it.get("departure_at") or "")[:10]  # YYYY-MM-DD
+            price = it.get("price")
+            if not dep.startswith(depart_month) or price is None:
+                continue  # trava no mês pedido (sem vazar p/ mês vizinho)
+            cur = days_map.get(dep)
+            if cur is None or price < cur["price"]:
+                days_map[dep] = {
+                    "date": dep,
+                    "price": price,
+                    "transfers": it.get("transfers"),
+                    "airline": it.get("airline"),
+                    "departure_at": it.get("departure_at"),
+                    "return_at": it.get("return_at"),
+                }
+    except httpx.HTTPError:
+        days_map = {}
+
+    # 2) Fallback: v1 prices/calendar se o v3 não trouxe nada.
+    if not days_map:
+        url = f"{TP_BASE}/v1/prices/calendar"
+        params = {
+            "origin": origin.upper(),
+            "destination": destination.upper(),
+            "depart_date": depart_month,
+            "calendar_type": "departure_date",
+            "currency": currency,
+        }
+        if return_month:
+            params["return_date"] = return_month
         try:
-            data = await _get(client, url, params=params, headers=headers)
+            async with httpx.AsyncClient() as client:
+                data = await _get(client, url, params=params, headers={"X-Access-Token": TP_TOKEN})
+            for day, info in (data.get("data") or {}).items():
+                d = day[:10]
+                if not d.startswith(depart_month):
+                    continue
+                days_map[d] = {
+                    "date": d,
+                    "price": info.get("price"),
+                    "transfers": info.get("transfers"),
+                    "airline": info.get("airline"),
+                    "departure_at": info.get("departure_at"),
+                    "return_at": info.get("return_at"),
+                }
         except httpx.HTTPError as e:
             raise HTTPException(502, f"Travelpayouts falhou: {e}")
 
-    days = []
-    for day, info in (data.get("data") or {}).items():
-        days.append(
-            {
-                "date": day,
-                "price": info.get("price"),
-                "transfers": info.get("transfers"),
-                "airline": info.get("airline"),
-                "departure_at": info.get("departure_at"),
-                "return_at": info.get("return_at"),
-            }
-        )
-    days.sort(key=lambda d: d["date"])
-    cheapest = min((d for d in days if d["price"]), key=lambda d: d["price"], default=None)
+    days = sorted(days_map.values(), key=lambda d: d["date"])
+    cheapest = min((d for d in days if d["price"] is not None), key=lambda d: d["price"], default=None)
     return {"ok": True, "currency": currency, "cheapest": cheapest, "days": days}
 
 
