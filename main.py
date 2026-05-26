@@ -60,7 +60,7 @@ def _need_token():
 # ---------------------------------------------------------------------------
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "token_set": bool(TP_TOKEN)}
+    return {"ok": True, "token_set": bool(TP_TOKEN), "searchapi_set": bool(SEARCHAPI_KEY)}
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +182,7 @@ async def calendar(
     return_month: str | None = None,
     currency: str = "brl",
     direct: bool = False,
+    debug: bool = False,
 ):
     # ===== PRIMÁRIO: searchapi.io (Google Flights AO VIVO) — mês inteiro, 1 chamada =====
     # Modo one-way = preço da IDA por dia de partida. É o sinal certo p/ achar o
@@ -189,6 +190,7 @@ async def calendar(
     # combinações da API (ida-volta varrendo o mês estouraria 30x30). O card
     # continua mostrando o total ida-volta real das datas escolhidas.
     if SEARCHAPI_KEY:
+        dbg = {"key_set": True}
         try:
             y, m = (int(x) for x in depart_month.split("-")[:2])
             first = f"{depart_month}-01"
@@ -209,10 +211,21 @@ async def calendar(
                 "api_key": SEARCHAPI_KEY,
             }
             async with httpx.AsyncClient(timeout=40) as client:
-                data = await _get(client, SEARCHAPI_BASE, params=params)
+                # get cru (sem raise) p/ conseguirmos ver status e corpo no debug
+                resp = await client.get(SEARCHAPI_BASE, params=params, timeout=40.0)
+            dbg["http_status"] = resp.status_code
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+                dbg["body_snippet"] = resp.text[:400]
+            cal = data.get("calendar") or []
+            dbg["calendar_len"] = len(cal)
+            if isinstance(data, dict) and data.get("error"):
+                dbg["api_error"] = str(data.get("error"))[:300]
             days = []
             cheapest = None
-            for it in data.get("calendar") or []:
+            for it in cal:
                 if it.get("has_no_flights") or it.get("price") is None:
                     continue
                 dep = (it.get("departure") or "")[:10]
@@ -223,6 +236,11 @@ async def calendar(
                 if it.get("is_lowest_price") and cheapest is None:
                     cheapest = d
             days.sort(key=lambda x: x["date"])
+            dbg["days_kept"] = len(days)
+            if debug:
+                return {"ok": True, "source": "searchapi", "debug": dbg,
+                        "params_sent": {k: v for k, v in params.items() if k != "api_key"},
+                        "days": days}
             if days:
                 if cheapest is None:
                     cheapest = min(days, key=lambda x: x["price"])
@@ -231,8 +249,13 @@ async def calendar(
                     "source": "searchapi", "mode": "ida",
                     "cheapest": cheapest, "days": days,
                 }
-        except httpx.HTTPError:
-            pass  # cai pro Travelpayouts abaixo
+        except Exception as e:  # noqa: BLE001 - queremos ver QUALQUER erro no debug
+            dbg["exception"] = f"{type(e).__name__}: {e}"
+            if debug:
+                return {"ok": False, "source": "searchapi", "debug": dbg}
+            # senão, cai silenciosamente pro Travelpayouts abaixo
+    elif debug:
+        return {"ok": False, "source": "searchapi", "debug": {"key_set": False}}
 
     # ===== FALLBACK: Travelpayouts (cache, ida-volta) — se searchapi falhar/sem chave =====
     _need_token()
