@@ -93,6 +93,7 @@ async def explore(
     origin: str = Query(..., description="IATA da origem, ex: SAO"),
     currency: str = "brl",
     depart_month: str | None = Query(None, description="YYYY-MM (opcional)"),
+    return_month: str | None = Query(None, description="YYYY-MM (opcional, p/ ida-volta)"),
     direct: bool = False,
 ):
     _need_token()
@@ -111,6 +112,8 @@ async def explore(
     }
     if depart_month:
         v3params["departure_at"] = depart_month
+    if return_month:
+        v3params["return_at"] = return_month  # torna ida-volta (com duração de volta)
     try:
         async with httpx.AsyncClient() as client:
             data = await _get(client, v3, params=v3params)
@@ -185,6 +188,7 @@ async def calendar(
         "origin": origin.upper(),
         "destination": destination.upper(),
         "departure_at": depart_month,
+        "return_at": return_month or depart_month,
         "currency": currency,
         "unique": "false",
         "sorting": "price",
