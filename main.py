@@ -25,6 +25,10 @@ from fastapi.middleware.cors import CORSMiddleware
 TP_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN", "")
 TP_BASE = "https://api.travelpayouts.com"
 
+# searchapi.io — Google Flights ao vivo, usado SÓ no calendário (cota grátis 100/mês)
+SEARCHAPI_KEY = os.environ.get("SEARCHAPI_KEY", "")
+SEARCHAPI_BASE = "https://www.searchapi.io/api/v1/search"
+
 app = FastAPI(title="Mapa de Viagem — Proxy", version="1.0.0")
 
 # Liberado para o app no navegador. São dados de leitura e o token fica no
@@ -179,6 +183,58 @@ async def calendar(
     currency: str = "brl",
     direct: bool = False,
 ):
+    # ===== PRIMÁRIO: searchapi.io (Google Flights AO VIVO) — mês inteiro, 1 chamada =====
+    # Modo one-way = preço da IDA por dia de partida. É o sinal certo p/ achar o
+    # melhor dia de voar, cobre TODOS os dias do mês e cabe no limite de 200
+    # combinações da API (ida-volta varrendo o mês estouraria 30x30). O card
+    # continua mostrando o total ida-volta real das datas escolhidas.
+    if SEARCHAPI_KEY:
+        try:
+            y, m = (int(x) for x in depart_month.split("-")[:2])
+            first = f"{depart_month}-01"
+            nxt = date(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+            last = f"{depart_month}-{(nxt - timedelta(days=1)).day:02d}"
+            params = {
+                "engine": "google_flights_calendar",
+                "flight_type": "one_way",
+                "departure_id": origin.upper(),
+                "arrival_id": destination.upper(),
+                "outbound_date": first,
+                "outbound_date_start": first,
+                "outbound_date_end": last,
+                "currency": currency.upper(),
+                "gl": "br",
+                "hl": "pt-br",
+                "stops": "nonstop" if direct else "any",
+                "api_key": SEARCHAPI_KEY,
+            }
+            async with httpx.AsyncClient(timeout=40) as client:
+                data = await _get(client, SEARCHAPI_BASE, params=params)
+            days = []
+            cheapest = None
+            for it in data.get("calendar") or []:
+                if it.get("has_no_flights") or it.get("price") is None:
+                    continue
+                dep = (it.get("departure") or "")[:10]
+                if not dep.startswith(depart_month):
+                    continue
+                d = {"date": dep, "price": it.get("price"), "transfers": None, "airline": None}
+                days.append(d)
+                if it.get("is_lowest_price") and cheapest is None:
+                    cheapest = d
+            days.sort(key=lambda x: x["date"])
+            if days:
+                if cheapest is None:
+                    cheapest = min(days, key=lambda x: x["price"])
+                return {
+                    "ok": True, "currency": currency,
+                    "source": "searchapi", "mode": "ida",
+                    "cheapest": cheapest, "days": days,
+                }
+        except httpx.HTTPError:
+            pass  # cai pro Travelpayouts abaixo
+
+    # ===== FALLBACK: Travelpayouts (cache, ida-volta) — se searchapi falhar/sem chave =====
     _need_token()
     days_map = {}
 
@@ -249,7 +305,11 @@ async def calendar(
 
     days = sorted(days_map.values(), key=lambda d: d["date"])
     cheapest = min((d for d in days if d["price"] is not None), key=lambda d: d["price"], default=None)
-    return {"ok": True, "currency": currency, "cheapest": cheapest, "days": days}
+    return {
+        "ok": True, "currency": currency,
+        "source": "travelpayouts", "mode": "ida-volta",
+        "cheapest": cheapest, "days": days,
+    }
 
 
 # ---------------------------------------------------------------------------
