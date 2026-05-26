@@ -29,6 +29,23 @@ TP_BASE = "https://api.travelpayouts.com"
 SEARCHAPI_KEY = os.environ.get("SEARCHAPI_KEY", "")
 SEARCHAPI_BASE = "https://www.searchapi.io/api/v1/search"
 
+# O Google Flights NÃO aceita códigos metropolitanos (ex.: SAO, RIO) que o
+# Travelpayouts aceita. Mapeamos p/ aeroportos reais — vírgula = "pega o mais
+# barato entre eles". Usado SÓ na chamada da searchapi; o Travelpayouts segue com o código original.
+CITY_AIRPORTS = {
+    "SAO": "GRU,CGH,VCP", "RIO": "GIG,SDU", "BHZ": "CNF,PLU",
+    "BUE": "EZE,AEP", "LON": "LHR,LGW,STN,LCY", "PAR": "CDG,ORY",
+    "NYC": "JFK,EWR,LGA", "MIL": "MXP,LIN,BGY", "TYO": "HND,NRT",
+    "MOW": "SVO,DME,VKO", "WAS": "IAD,DCA,BWI", "CHI": "ORD,MDW",
+    "ROM": "FCO,CIA", "OSA": "KIX,ITM", "BJS": "PEK,PKX", "SEL": "ICN,GMP",
+    "STO": "ARN,BMA", "BER": "BER", "DXB": "DXB",
+}
+
+
+def _gf_code(code: str) -> str:
+    """Converte código de cidade -> aeroporto(s) que o Google Flights entende."""
+    return CITY_AIRPORTS.get((code or "").upper(), (code or "").upper())
+
 app = FastAPI(title="Mapa de Viagem — Proxy", version="1.0.0")
 
 # Liberado para o app no navegador. São dados de leitura e o token fica no
@@ -199,8 +216,8 @@ async def calendar(
             params = {
                 "engine": "google_flights_calendar",
                 "flight_type": "one_way",
-                "departure_id": origin.upper(),
-                "arrival_id": destination.upper(),
+                "departure_id": _gf_code(origin),
+                "arrival_id": _gf_code(destination),
                 "outbound_date": first,
                 "outbound_date_start": first,
                 "outbound_date_end": last,
